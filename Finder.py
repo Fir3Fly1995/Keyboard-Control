@@ -104,6 +104,14 @@ def open_lighting_device():
             return d
     raise RuntimeError("K582 lighting interface not found.")
 
+def open_device(interface):
+    for dev in hid.enumerate(VID, PID):
+        if dev.get("interface_number") == interface and dev.get("usage") == 6:
+            d = hid.device()
+            d.open_path(dev["path"])
+            return d
+    raise RuntimeError(f"K582 input interface not found.")
+
 
 def build_packet(addr_lo, addr_hi, r, g, b):
     """Build a 64-byte lighting data packet."""
@@ -382,7 +390,7 @@ def main():
 
     try:
         print("\nOpening lighting interface (Interface 1)...")
-        ldev = open_device(IFACE_LIGHTING)
+        ldev = open_lighting_device()
         print("Opening input interface (Interface 0)...")
         idev = open_device(IFACE_INPUT)
         print("✓ K582 connected.\n")
