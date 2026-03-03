@@ -18,6 +18,8 @@ Calibration Passes:
   Pass 3 - Lock-in   : Call out keys, user presses to confirm. Confirmed = dark (locked).
 """
 
+from tracemalloc import start
+
 import hid
 import json
 import time
@@ -98,9 +100,13 @@ CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cont
 # ═════════════════════════════════════════════
 
 def open_lighting_device():
-    d = hid.device()
-    d.open(VID, PID)
-    return d
+    hid_filter = pywinusb.HidDeviceFilter(vendor_id=VID, product_id=PID)
+    devices = hid_filter.get_devices() or []
+    for d in devices:
+        if "col04" in d.device_path.lower():
+            d.open()
+            return d
+    raise RuntimeError("K582 lighting interface not found.")
 
 def open_device(interface):
     for dev in hid.enumerate(VID, PID):
@@ -131,14 +137,11 @@ def send_colour(dev, addr_lo, addr_hi, r, g, b):
     start  = [0x00, 0x04, 0x01, 0x00, 0x01] + [0x00] * 59
     commit = [0x00, 0x04, 0x02, 0x00, 0x02] + [0x00] * 59
     data   = [0x00] + build_packet(addr_lo, addr_hi, r, g, b)
-    dev.write(start)
+    dev.send_output_report([0x00] + start[1:])
     time.sleep(0.01)
-    dev.write(data)
+    dev.send_output_report([0x00] + data[1:])
     time.sleep(0.01)
-    dev.write(commit)
-    time.sleep(0.05)
-
-
+    dev.send_output_report([0x00] + commit[1:])
 # ═════════════════════════════════════════════
 # Control.js helpers
 # ═════════════════════════════════════════════
@@ -402,14 +405,7 @@ def main():
     except RuntimeError as e:
         print(f"\nERROR: {e}")
         sys.exit(1)
-# test module
-        print("Testing write...")
-    try:
-        result = ldev.write([0x00, 0x04, 0x01, 0x00, 0x01] + [0x00] * 59)
-        print(f"Write result: {result}")
-    except Exception as e:
-        print(f"Write failed: {e}")
-#end test module
+
     ctrl  = load_control_js()
     state = ctrl.get("calibration_state", "pass1")
     print(f"Calibration state: {state}\n")
