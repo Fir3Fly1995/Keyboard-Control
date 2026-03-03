@@ -18,14 +18,13 @@ Calibration Passes:
   Pass 3 - Lock-in   : Call out keys, user presses to confirm. Confirmed = dark (locked).
 """
 
-from tracemalloc import start
-
 import hid
 import json
 import time
 import os
 import sys
 import pywinusb.hid as pywinusb
+import ctypes
 
 #Lets find the break!
 print("Available K582 interfaces:")
@@ -118,14 +117,7 @@ def open_device(interface):
 
 
 def build_packet(addr_lo, addr_hi, r, g, b):
-    """Build a 64-byte lighting data packet."""
-    data = [0x00] * 64
-    data[0] = 0x04
-    data[3] = addr_lo
-    data[4] = addr_hi
-    data[8] = r
-    data[9] = g
-    data[10] = b
+    data = [0x04, 0x00, 0x00, addr_lo, addr_hi, 0x00, 0x00, 0x00, r, g, b] + [0x00] * 53
     csum = sum(data[3:]) & 0xFFFF
     data[1] = csum & 0xFF
     data[2] = (csum >> 8) & 0xFF
@@ -133,15 +125,22 @@ def build_packet(addr_lo, addr_hi, r, g, b):
 
 
 def send_colour(dev, addr_lo, addr_hi, r, g, b):
-    """Send start -> colour -> commit to set a single key colour."""
-    start  = [0x00, 0x04, 0x01, 0x00, 0x01] + [0x00] * 59
-    commit = [0x00, 0x04, 0x02, 0x00, 0x02] + [0x00] * 59
-    data   = [0x00] + build_packet(addr_lo, addr_hi, r, g, b)
-    dev.send_output_report([0x00] + start[1:])
-    time.sleep(0.01)
-    dev.send_output_report([0x00] + data[1:])
-    time.sleep(0.01)
-    dev.send_output_report([0x00] + commit[1:])
+    start  = [0x04, 0x01, 0x00, 0x01] + [0x00] * 60
+    commit = [0x04, 0x02, 0x00, 0x02] + [0x00] * 60
+    data   = build_packet(addr_lo, addr_hi, r, g, b)
+    print(f"Data packet: {data[:12]}")
+
+    import ctypes
+    for packet in [start, data, commit]:
+        buf = (ctypes.c_ubyte * 65)(0, *packet[:64])
+        bytes_written = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.WriteFile(
+            dev._device_handle, buf, 65,
+            ctypes.byref(bytes_written), None)
+        print(f"Written: {bytes_written.value}")
+        time.sleep(0.02)
+
+
 # ═════════════════════════════════════════════
 # Control.js helpers
 # ═════════════════════════════════════════════
