@@ -23,6 +23,7 @@ import json
 import time
 import os
 import sys
+import pywinusb.hid as pywinusb
 
 #Lets find the break!
 print("Available K582 interfaces:")
@@ -97,12 +98,9 @@ CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cont
 # ═════════════════════════════════════════════
 
 def open_lighting_device():
-    for dev in hid.enumerate(VID, PID):
-        if dev.get("usage_page") == 65308 and dev.get("usage") == 146:
-            d = hid.device()
-            d.open_path(dev["path"])
-            return d
-    raise RuntimeError("K582 lighting interface not found.")
+    d = hid.device()
+    d.open(VID, PID)
+    return d
 
 def open_device(interface):
     for dev in hid.enumerate(VID, PID):
@@ -382,6 +380,13 @@ def pass3_lockin(ldev, idev, ctrl):
 # ═════════════════════════════════════════════
 
 def main():
+    import pywinusb.hid as pywinusb
+    filter = pywinusb.HidDeviceFilter(vendor_id=VID, product_id=PID)
+    devices = filter.get_devices()
+    devices = devices if devices is not None else []
+    print(f"pywinusb found: {len(devices)} devices")
+    for d in devices:
+        print(f"  {d}")
     print("="*60)
     print(" Redragon K582 Surara — Finder.py")
     print(" LED Address Calibration Tool")
@@ -397,7 +402,14 @@ def main():
     except RuntimeError as e:
         print(f"\nERROR: {e}")
         sys.exit(1)
-
+# test module
+        print("Testing write...")
+    try:
+        result = ldev.write([0x00, 0x04, 0x01, 0x00, 0x01] + [0x00] * 59)
+        print(f"Write result: {result}")
+    except Exception as e:
+        print(f"Write failed: {e}")
+#end test module
     ctrl  = load_control_js()
     state = ctrl.get("calibration_state", "pass1")
     print(f"Calibration state: {state}\n")
