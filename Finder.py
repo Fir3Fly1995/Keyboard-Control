@@ -24,6 +24,11 @@ import time
 import os
 import sys
 
+#Lets find the break!
+print("Available K582 interfaces:")
+for dev in hid.enumerate(0x320F, 0x5000):
+    print(f"  Interface {dev.get('interface_number')}: usage={hex(dev.get('usage',0))} usage_page={hex(dev.get('usage_page',0))}")
+
 # ─────────────────────────────────────────────
 # Device constants
 # ─────────────────────────────────────────────
