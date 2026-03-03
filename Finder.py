@@ -96,21 +96,13 @@ CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cont
 # Device helpers
 # ═════════════════════════════════════════════
 
-def open_device(interface):
-    devices = hid.enumerate(VID, PID)
-    print(f"Found {len(devices)} interfaces:")
-    for dev in devices:
-        print(f"  {dev}")
-    for dev in devices:
-        if dev.get("interface_number") == interface:
-            try:
-                d = hid.device()
-                d.open_path(dev["path"])
-                print(f"Opened: usage={hex(dev.get('usage',0))} usage_page={hex(dev.get('usage_page',0))}")
-                return d
-            except Exception as e:
-                print(f"  Failed: {e}")
-    raise RuntimeError(f"K582 interface {interface} not found.")
+def open_lighting_device():
+    for dev in hid.enumerate(VID, PID):
+        if dev.get("usage_page") == 65308 and dev.get("usage") == 146:
+            d = hid.device()
+            d.open_path(dev["path"])
+            return d
+    raise RuntimeError("K582 lighting interface not found.")
 
 
 def build_packet(addr_lo, addr_hi, r, g, b):
