@@ -6,16 +6,22 @@ Project: K582 Open Source RGB Controller
 License: Open Source
 
 Protocol (reverse engineered via Wireshark):
-  VID: 0x320F  PID: 0x5000  Interface: 1
-  Packet (64 bytes):
+  VID: 0x320F  PID: 0x5000  Interface: 1 (col04 path)
+  Packet (64 bytes, no report ID byte):
     START:  04 01 00 01 00 00 ... (64 bytes)
-    DATA:   04 <csum_lo> <csum_hi> <addr_lo> <addr_hi> 00 00 00 <R> <G> <B> 00...
+    DATA:   04 <csum_lo> <csum_hi> 11 03 <key_id> 00 00 <R> <G> <B> 00...
     COMMIT: 04 02 00 02 00 00 ... (64 bytes)
+  Checksum: sum(data[3:]) & 0xFFFF, split lo/hi into bytes 1/2
+
+  key_id: single byte (0x00-0xFF) identifying the LED address
+  Known mappings: ESC=0x00, W=0x84, A=0xC0, H=0xCF
 
 Calibration Passes:
-  Pass 1 - Discovery : Light one address white. User presses lit keys + L-Alt+Enter.
-  Pass 2 - Identity  : Ask user to press a named key. Correct=green, wrong=red (retry).
-  Pass 3 - Lock-in   : Call out keys, user presses to confirm. Confirmed = dark (locked).
+  Pass 1 - Discovery : Scan all 256 key IDs. Light white, user confirms.
+                       Blue = single key mapped. Red = conflict (multiple keys).
+                       Red resolution sub-phase clears conflicts.
+  Pass 2 - Verification : Batches of 5 keys lit white. User presses Y/N.
+                           Y key = bright green. Confirmed batch = dark green.
 """
 
 import hid
@@ -27,71 +33,69 @@ import ctypes
 import ctypes.wintypes
 import keyboard
 
-#Lets find the break!
-print("Available K582 interfaces:")
-for dev in hid.enumerate(0x320F, 0x5000):
-    print(f"  Interface {dev.get('interface_number')}: usage={hex(dev.get('usage',0))} usage_page={hex(dev.get('usage_page',0))}")
-
 # ─────────────────────────────────────────────
 # Device constants
 # ─────────────────────────────────────────────
 VID            = 0x320F
 PID            = 0x5000
-IFACE_LIGHTING = 1
 IFACE_INPUT    = 0
 
-GENERIC_WRITE = 0x40000000
-OPEN_EXISTING = 0x3
-FILE_SHARE_READ = 0x1
+GENERIC_WRITE  = 0x40000000
+OPEN_EXISTING  = 0x3
+FILE_SHARE_READ  = 0x1
 FILE_SHARE_WRITE = 0x2
 
 # ─────────────────────────────────────────────
 # Colours
 # ─────────────────────────────────────────────
-WHITE = (255, 255, 255)
-BLUE  = (0,   0,   255)
-GREEN = (0,   100, 0  )
-RED   = (255, 0,   0  )
-OFF   = (0,   0,   0  )
+WHITE      = (255, 255, 255)
+BLUE       = (0,   0,   255)
+RED        = (255, 0,   0  )
+GREEN_YES  = (0,   255, 0  )   # Y key during Pass 2
+GREEN_CONF = (0,   90,  0  )   # Confirmed key in Pass 2
+OFF        = (0,   0,   0  )
 
 # ─────────────────────────────────────────────
-# HID usage code -> key name
+# HID usage code -> key name (keyboard library compatible)
 # ─────────────────────────────────────────────
 HID_KEY_MAP = {
-    0x04: "A",        0x05: "B",        0x06: "C",        0x07: "D",
-    0x08: "E",        0x09: "F",        0x0A: "G",        0x0B: "H",
-    0x0C: "I",        0x0D: "J",        0x0E: "K",        0x0F: "L",
-    0x10: "M",        0x11: "N",        0x12: "O",        0x13: "P",
-    0x14: "Q",        0x15: "R",        0x16: "S",        0x17: "T",
-    0x18: "U",        0x19: "V",        0x1A: "W",        0x1B: "X",
-    0x1C: "Y",        0x1D: "Z",
+    0x04: "a",        0x05: "b",        0x06: "c",        0x07: "d",
+    0x08: "e",        0x09: "f",        0x0A: "g",        0x0B: "h",
+    0x0C: "i",        0x0D: "j",        0x0E: "k",        0x0F: "l",
+    0x10: "m",        0x11: "n",        0x12: "o",        0x13: "p",
+    0x14: "q",        0x15: "r",        0x16: "s",        0x17: "t",
+    0x18: "u",        0x19: "v",        0x1A: "w",        0x1B: "x",
+    0x1C: "y",        0x1D: "z",
     0x1E: "1",        0x1F: "2",        0x20: "3",        0x21: "4",
     0x22: "5",        0x23: "6",        0x24: "7",        0x25: "8",
     0x26: "9",        0x27: "0",
-    0x28: "ENTER",    0x29: "ESC",      0x2A: "BACKSPACE", 0x2B: "TAB",
-    0x2C: "SPACE",    0x2D: "-",        0x2E: "=",
+    0x28: "enter",    0x29: "esc",      0x2A: "backspace", 0x2B: "tab",
+    0x2C: "space",    0x2D: "-",        0x2E: "=",
     0x2F: "[",        0x30: "]",        0x31: "\\",
     0x33: ";",        0x34: "'",        0x35: "`",
     0x36: ",",        0x37: ".",        0x38: "/",
-    0x39: "CAPS",
-    0x3A: "F1",       0x3B: "F2",       0x3C: "F3",       0x3D: "F4",
-    0x3E: "F5",       0x3F: "F6",       0x40: "F7",       0x41: "F8",
-    0x42: "F9",       0x43: "F10",      0x44: "F11",      0x45: "F12",
-    0x46: "PRTSC",    0x47: "SCRLK",    0x48: "PAUSE",
-    0x49: "INS",      0x4A: "HOME",     0x4B: "PGUP",
-    0x4C: "DEL",      0x4D: "END",      0x4E: "PGDN",
-    0x4F: "RIGHT",    0x50: "LEFT",     0x51: "DOWN",     0x52: "UP",
-    0x53: "NUMLK",    0x54: "NUM/",     0x55: "NUM*",     0x56: "NUM-",
-    0x57: "NUM+",     0x58: "NUMENTER",
-    0x59: "NUM1",     0x5A: "NUM2",     0x5B: "NUM3",     0x5C: "NUM4",
-    0x5D: "NUM5",     0x5E: "NUM6",     0x5F: "NUM7",     0x60: "NUM8",
-    0x61: "NUM9",     0x62: "NUM0",     0x63: "NUM.",
-    0x65: "APP",
-    0xE0: "L-CTRL",   0xE1: "L-SHIFT",  0xE2: "L-ALT",    0xE3: "L-WIN",
-    0xE4: "R-CTRL",   0xE5: "R-SHIFT",  0xE6: "R-ALT",    0xE7: "R-WIN",
+    0x39: "caps lock",
+    0x3A: "f1",       0x3B: "f2",       0x3C: "f3",       0x3D: "f4",
+    0x3E: "f5",       0x3F: "f6",       0x40: "f7",       0x41: "f8",
+    0x42: "f9",       0x43: "f10",      0x44: "f11",      0x45: "f12",
+    0x46: "print screen", 0x47: "scroll lock", 0x48: "pause",
+    0x49: "insert",   0x4A: "home",     0x4B: "page up",
+    0x4C: "delete",   0x4D: "end",      0x4E: "page down",
+    0x4F: "right",    0x50: "left",     0x51: "down",     0x52: "up",
+    0x53: "num lock", 0x54: "num /",    0x55: "num *",    0x56: "num -",
+    0x57: "num +",    0x58: "num enter",
+    0x59: "num 1",    0x5A: "num 2",    0x5B: "num 3",    0x5C: "num 4",
+    0x5D: "num 5",    0x5E: "num 6",    0x5F: "num 7",    0x60: "num 8",
+    0x61: "num 9",    0x62: "num 0",    0x63: "num .",
+    0x65: "menu",
+    0xE0: "left ctrl",  0xE1: "left shift", 0xE2: "left alt",  0xE3: "left windows",
+    0xE4: "right ctrl", 0xE5: "right shift",0xE6: "right alt", 0xE7: "right windows",
 }
 
-CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Control.json")
+# Display names for CLI output (uppercase friendly)
+HID_DISPLAY_MAP = {k: v.upper() for k, v in HID_KEY_MAP.items()}
+
+CONTROL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Control.json")
 
 
 # ═════════════════════════════════════════════
@@ -112,266 +116,414 @@ def open_lighting_device():
             if handle == -1:
                 raise RuntimeError(f"CreateFileA failed: {ctypes.get_last_error()}")
             return handle
-    raise RuntimeError("K582 lighting interface not found.")
+    raise RuntimeError("K582 lighting interface (col04) not found.")
 
-def open_device(interface):
+
+def open_input_device():
     for dev in hid.enumerate(VID, PID):
-        if dev.get("interface_number") == interface and dev.get("usage") == 6:
+        if dev.get("interface_number") == IFACE_INPUT and dev.get("usage") == 6:
             d = hid.device()
             d.open_path(dev["path"])
             d.set_nonblocking(1)
             return d
-    raise RuntimeError(f"K582 input interface not found.")
+    raise RuntimeError("K582 input interface not found.")
 
+
+# ═════════════════════════════════════════════
+# Packet helpers
+# ═════════════════════════════════════════════
 
 def build_packet(key_id, r, g, b):
+    """Build a 64-byte DATA packet for a single key colour command."""
     data = [0x04, 0x00, 0x00, 0x11, 0x03, key_id, 0x00, 0x00, r, g, b] + [0x00] * 53
     csum = sum(data[3:]) & 0xFFFF
     data[1] = csum & 0xFF
     data[2] = (csum >> 8) & 0xFF
     return data
 
+
 def send_colour(handle, key_id, r, g, b):
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    start  = (ctypes.c_ubyte * 64)(0x04, 0x01, 0x00, 0x01, *([0]*60))
-    data   = build_packet(key_id, r, g, b)
-    print(f"Packet: {list(data[:12])}")
-    commit = (ctypes.c_ubyte * 64)(0x04, 0x02, 0x00, 0x02, *([0]*60))
-    written = ctypes.c_ulong(0)
-    for pkt in [start, (ctypes.c_ubyte * 64)(*data), commit]:
+    written  = ctypes.c_ulong(0)
+    start    = (ctypes.c_ubyte * 64)(0x04, 0x01, 0x00, 0x01, *([0]*60))
+    data     = (ctypes.c_ubyte * 64)(*build_packet(key_id, r, g, b))
+    print(f"  DBG: {list(build_packet(key_id, r, g, b)[:12])}")  # ADD HERE
+    commit   = (ctypes.c_ubyte * 64)(0x04, 0x02, 0x00, 0x02, *([0]*60))
+    for pkt in [start, data, commit]:
         kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
-        print(f"Written: {written.value}")
         time.sleep(0.02)
 
 
+def init_keyboard(handle):
+    """
+    Send the full initialisation sequence:
+      1. Mode switch to custom lighting (06 01 command)
+      2. Double START
+      3. Clear all LEDs to black (11 36 packets)
+      4. COMMIT
+    Must be called before any per-key colour commands will take effect.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    def send_raw(pkt_bytes):
+        written = ctypes.c_ulong(0)
+        pkt = (ctypes.c_ubyte * 64)(*pkt_bytes[:64])
+        kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
+        time.sleep(0.02)
+
+    # 1. Mode switch to custom lighting
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    send_raw([0x04, 0x1b, 0x00, 0x06, 0x01, 0x00, 0x00, 0x00, 0x14] + [0x00] * 55)
+    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
+
+    # 2. Double START
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+
+    # 3. Clear all LEDs to black (8 packets covering all LED addresses)
+    offsets   = [0x00, 0x36, 0x6c, 0xa2, 0xd8, 0x0e, 0x44, 0x7a]
+    csum_vals = [0x47, 0x7d, 0xb2, 0xe8, 0x1f, 0x56, 0x8c, 0xc2]
+    for offset, csum in zip(offsets, csum_vals):
+        hi = 0x01 if csum >= 0x100 else 0x00
+        send_raw([0x04, csum & 0xFF, hi, 0x11, 0x36, offset, 0x00, 0x00] + [0x00] * 56)
+
+    # 4. COMMIT
+    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
+
+
+def paint_keyboard(handle, ctrl):
+    """Repaint all known keys from Control.json (blue=mapped, red=conflict)."""
+    blue_keys = ctrl.get("blue_keys", {})
+    red_keys  = ctrl.get("red_keys", {})
+    for id_str in blue_keys:
+        send_colour(handle, int(id_str, 16), *BLUE)
+    for id_str in red_keys:
+        send_colour(handle, int(id_str, 16), *RED)
+
+
 # ═════════════════════════════════════════════
-# Control.js helpers
+# Control.json helpers
 # ═════════════════════════════════════════════
 
-def load_control_js():
-    if os.path.exists(CONTROL_JS_PATH):
-        with open(CONTROL_JS_PATH, "r") as f:
+def load_control():
+    if os.path.exists(CONTROL_PATH):
+        with open(CONTROL_PATH, "r") as f:
             return json.load(f)
-    return {"calibration_state": "pass1", "addr_map": {}, "address_to_hid": {},
-            "verified_keys": {}, "locked_keys": {}, "final_map": {}}
+    return {
+        "calibration_state": "pass1",
+        "confirm_key": None,
+        "blue_keys": {},
+        "red_keys": {},
+        "final_map": {},
+        "last_addr": -1
+    }
 
 
-def save_control_js(data):
-    with open(CONTROL_JS_PATH, "w") as f:
+def save_control(data):
+    with open(CONTROL_PATH, "w") as f:
         json.dump(data, f, indent=2)
-    print(f"  [Saved -> {CONTROL_JS_PATH}]")
+    print(f"  [Saved -> {CONTROL_PATH}]")
 
 
 # ═════════════════════════════════════════════
 # Input helpers
 # ═════════════════════════════════════════════
 
-def read_pressed_keys(input_dev):
-    pressed = set()
-    try:
-        report = input_dev.read(64)
-        print(f"Raw report: {report[:8]}") #debug, hopefully
-        if report and len(report) >= 8:
-            mod = report[0]
-            if mod & 0x01: pressed.add(0xE0)
-            if mod & 0x02: pressed.add(0xE1)
-            if mod & 0x04: pressed.add(0xE2)
-            if mod & 0x08: pressed.add(0xE3)
-            if mod & 0x10: pressed.add(0xE4)
-            if mod & 0x20: pressed.add(0xE5)
-            if mod & 0x40: pressed.add(0xE6)
-            if mod & 0x80: pressed.add(0xE7)
-            for b in report[2:8]:
-                if b != 0x00:
-                    pressed.add(b)
-    except Exception as e:
-        print(f"Read error: {e}")
-    pass
-    return pressed
+MODIFIERS = {0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7}
 
 
-def wait_for_confirm(input_dev):
-    print("  >> Press lit keys, then L-ALT + ENTER to confirm...")
+def wait_for_lalt_numenter():
+    print("  >> Press lit key(s), then L-ALT + NUM ENTER to confirm...")
     collected = set()
+    EXCLUDE = {0xE2, 0x28, 0x58}  # L-ALT, ENTER, NUM ENTER
+    time.sleep(0.3)  # debounce before listening
     while True:
         time.sleep(0.02)
         for hid_code, key_name in HID_KEY_MAP.items():
+            if hid_code in MODIFIERS or hid_code in EXCLUDE:
+                continue
             try:
-                if keyboard.is_pressed(key_name.lower()):
-                    if hid_code not in (0xE2, 0x28) and hid_code not in collected:
+                if keyboard.is_pressed(key_name):
+                    if hid_code not in collected:
                         collected.add(hid_code)
-                        print(f"    Key detected: {HID_KEY_MAP.get(hid_code, f'0x{hid_code:02x}')} (HID 0x{hid_code:02x})")
+                        print(f"    Detected: {HID_DISPLAY_MAP.get(hid_code, key_name)} (HID 0x{hid_code:02x})")
             except ValueError:
                 continue
-        if keyboard.is_pressed('left alt') and keyboard.is_pressed('num enter'):
-            time.sleep(0.15)
+        if keyboard.is_pressed("left alt") and keyboard.is_pressed("num enter"):
+            time.sleep(0.3)  # debounce after
             break
     return collected
 
-def wait_for_single_key():
-    MODIFIERS = {'left ctrl','left shift','left alt','left windows',
-                 'right ctrl','right shift','right alt','right windows'}
+
+def wait_for_confirm_key(confirm_hid):
+    confirm_name = HID_KEY_MAP.get(confirm_hid, "")
+    print(f"  >> Press lit key(s), then {HID_DISPLAY_MAP.get(confirm_hid, '?')} to confirm...")
+    collected = set()
+    # Wait for all keys to be released before listening
+    time.sleep(0.5)
+    try:
+        while any(keyboard.is_pressed(name) for name in HID_KEY_MAP.values() if name):
+            time.sleep(0.05)
+    except ValueError:
+        time.sleep(0.3)
+    time.sleep(0.1)
     while True:
         time.sleep(0.02)
         for hid_code, key_name in HID_KEY_MAP.items():
+            if hid_code in MODIFIERS or hid_code == confirm_hid:
+                continue
             try:
-                if key_name.lower() not in MODIFIERS and keyboard.is_pressed(key_name.lower()):
-                    return hid_code
+                if keyboard.is_pressed(key_name):
+                    if hid_code not in collected:
+                        collected.add(hid_code)
+                        print(f"    Detected: {HID_DISPLAY_MAP.get(hid_code, key_name)} (HID 0x{hid_code:02x})")
             except ValueError:
                 continue
+        try:
+            if confirm_name and keyboard.is_pressed(confirm_name):
+                time.sleep(0.5)
+                break
+        except ValueError:
+            pass
+    return collected
+
+
+def wait_for_yn(y_hid, n_hid):
+    """Wait for Y or N keypress. Returns True for Y, False for N."""
+    y_name = HID_KEY_MAP.get(y_hid, "")
+    n_name = HID_KEY_MAP.get(n_hid, "")
+    while True:
+        time.sleep(0.02)
+        try:
+            if y_name and keyboard.is_pressed(y_name):
+                time.sleep(0.15)
+                return True
+        except ValueError:
+            pass
+        try:
+            if n_name and keyboard.is_pressed(n_name):
+                time.sleep(0.15)
+                return False
+        except ValueError:
+            pass
 
 
 # ═════════════════════════════════════════════
 # PASS 1 — Discovery
 # ═════════════════════════════════════════════
 
-def pass1_discovery(ldev, idev, ctrl):
+def pass1_discovery(ldev, ctrl):
     print("\n" + "="*60)
     print("PASS 1: DISCOVERY")
     print("="*60)
-    print("One key ID at a time will light WHITE.")
-    print("Press every key that lights up, then L-ALT + NUM ENTER.")
-    print("Multiple keys lighting = shared ID (thats fine!).")
+    print("Each key ID will light WHITE one at a time.")
+    print("Press the lit key(s), then confirm.")
+    print("First confirm: L-ALT + NUM ENTER")
+    print("All subsequent: press the first confirmed key")
+    print("L-ALT + NUM ENTER at any time to end scan early.")
     print("="*60 + "\n")
 
-    addr_map       = ctrl.get("addr_map", {})
-    address_to_hid = ctrl.get("address_to_hid", {})
-    start          = ctrl.get("last_addr", -1) + 1
+    blue_keys   = ctrl.get("blue_keys", {})
+    red_keys    = ctrl.get("red_keys", {})
+    confirm_key = ctrl.get("confirm_key", None)
+    start       = ctrl.get("last_addr", -1) + 1
 
-    if start > 0:
-        print(f"Resuming from key ID 0x{start:02x}\n")
+    if confirm_key is not None:
+        print(f"Resuming from key ID 0x{start:02x}")
+        print(f"Confirm key: {HID_DISPLAY_MAP.get(confirm_key, '?')} (HID 0x{confirm_key:02x})\n")
+
+    # Initial keyboard setup — only once
+    init_keyboard(ldev)
+    paint_keyboard(ldev, ctrl)
 
     for key_id in range(start, 0x100):
         id_str = f"0x{key_id:02x}"
+
+        # Skip already confirmed keys
+        if id_str in blue_keys:
+            continue
+
         print(f"Key ID {id_str}  ({key_id + 1}/256)")
 
-        init_keyboard(ldev)
+        # Light the current key white
         send_colour(ldev, key_id, *WHITE)
-        pressed_hids = wait_for_confirm(idev)
-        send_colour(ldev, key_id, *BLUE)
 
-        if pressed_hids:
-            address_to_hid[id_str] = list(pressed_hids)
-            for hid_code in pressed_hids:
-                key = str(hid_code)
-                if key not in addr_map:
-                    addr_map[key] = []
-                if id_str not in addr_map[key]:
-                    addr_map[key].append(id_str)
-            names = [HID_KEY_MAP.get(h, f"0x{h:02x}") for h in pressed_hids]
-            print(f"  -> Mapped: {', '.join(names)} = {id_str}\n")
+        # Wait for user confirmation
+        if confirm_key is None:
+            pressed_hids = wait_for_lalt_numenter()
         else:
-            print(f"  -> No keys lit. Skipping.\n")
+            pressed_hids = wait_for_confirm_key(confirm_key)
 
-        ctrl.update({"addr_map": addr_map, "address_to_hid": address_to_hid,
-                     "last_addr": key_id, "calibration_state": "pass1"})
-        save_control_js(ctrl)
+        # Turn off the white key before repainting
+        send_colour(ldev, key_id, *OFF)
+
+        if not pressed_hids:
+            print(f"  -> No keys pressed. Skipping.\n")
+            ctrl["last_addr"] = key_id
+            save_control(ctrl)
+            paint_keyboard(ldev, ctrl)
+            continue
+
+        # Remove confirm key from pressed set if accidentally included
+        if confirm_key:
+            pressed_hids.discard(confirm_key)
+
+        if len(pressed_hids) == 1:
+            hid_code = next(iter(pressed_hids))
+            name = HID_DISPLAY_MAP.get(hid_code, f"0x{hid_code:02x}")
+
+            # Check if this key_id was previously red — resolve it
+            if id_str in red_keys:
+                del red_keys[id_str]
+
+            blue_keys[id_str] = hid_code
+            print(f"  -> Mapped: {name} = {id_str} [BLUE]\n")
+
+            # First confirmed key becomes our confirm key
+            if confirm_key is None:
+                confirm_key = hid_code
+                print(f"  [Confirm key set to: {name}]\n")
+
+        elif len(pressed_hids) > 1:
+            names = [HID_DISPLAY_MAP.get(h, f"0x{h:02x}") for h in pressed_hids]
+            print(f"  -> CONFLICT: {', '.join(names)} = {id_str} [RED]\n")
+            red_keys[id_str] = list(pressed_hids)
+
+        ctrl.update({
+            "blue_keys":   blue_keys,
+            "red_keys":    red_keys,
+            "confirm_key": confirm_key,
+            "last_addr":   key_id,
+            "calibration_state": "pass1"
+        })
+        save_control(ctrl)
+
+        # Blank and repaint known keys before next address
+        init_keyboard(ldev)
+        paint_keyboard(ldev, ctrl)
+
+    # ── Red resolution sub-phase ──────────────────────────────
+    if red_keys:
+        print("\n" + "="*60)
+        print("RESOLVING CONFLICTS (RED KEYS)")
+        print("="*60)
+        print("Watch for a red key to flash WHITE — press it!")
+        print(f"Confirm with: {HID_DISPLAY_MAP.get(confirm_key, '?')}\n")
+
+        for id_str in list(red_keys.keys()):
+            key_id = int(id_str, 16)
+            init_keyboard(ldev)
+            paint_keyboard(ldev, ctrl)
+            send_colour(ldev, key_id, *WHITE)
+            print(f"Key ID {id_str} — which key lit white?")
+
+            pressed = wait_for_confirm_key(confirm_key)
+            pressed.discard(confirm_key)
+
+            if len(pressed) == 1:
+                hid_code = next(iter(pressed))
+                name = HID_DISPLAY_MAP.get(hid_code, f"0x{hid_code:02x}")
+                blue_keys[id_str] = hid_code
+                del red_keys[id_str]
+                print(f"  -> Resolved: {name} = {id_str} [BLUE]\n")
+            else:
+                print(f"  -> Could not resolve {id_str}, leaving red.\n")
+
+            ctrl.update({"blue_keys": blue_keys, "red_keys": red_keys})
+            save_control(ctrl)
 
     print("\n✓ Pass 1 complete!")
     ctrl["calibration_state"] = "pass2"
-    save_control_js(ctrl)
+    save_control(ctrl)
     return ctrl
 
 
 # ═════════════════════════════════════════════
-# PASS 2 — Identity
+# PASS 2 — Verification
 # ═════════════════════════════════════════════
 
-def pass2_identity(ldev, idev, ctrl):
+def pass2_verification(ldev, ctrl):
     print("\n" + "="*60)
-    print("PASS 2: IDENTITY VERIFICATION")
+    print("PASS 2: VERIFICATION")
     print("="*60)
-    print("Press the named key when asked.")
-    print("Correct = GREEN  |  Wrong = RED (will retry)")
+    print("5 keys at a time will light WHITE.")
+    print("CLI will show what keys SHOULD be lit.")
+    print("Y key = bright green (correct).")
+    print("N key = red (incorrect, flagged for review).")
     print("="*60 + "\n")
 
-    addr_map = ctrl.get("addr_map", {})
-    verified = ctrl.get("verified_keys", {})
-    to_verify = [int(k) for k in addr_map if k not in verified]
+    blue_keys = ctrl.get("blue_keys", {})
+    final_map = ctrl.get("final_map", {})
 
-    for hid_code in to_verify:
-        key_name  = HID_KEY_MAP.get(hid_code, f"0x{hid_code:02x}")
-        addresses = addr_map[str(hid_code)]
-        print(f"\nPress: [ {key_name} ]")
+    # Look up Y and N key IDs from blue_keys
+    y_hid = None
+    n_hid = None
+    y_id  = None
+    n_id  = None
 
-        for a in addresses:
-                av = int(a, 16)
-                send_colour(ldev, av, *WHITE)
+    for id_str, hid_code in blue_keys.items():
+        if HID_KEY_MAP.get(hid_code) == "y" and y_hid is None:
+            y_hid = hid_code
+            y_id  = int(id_str, 16)
+        if HID_KEY_MAP.get(hid_code) == "n" and n_hid is None:
+            n_hid = hid_code
+            n_id  = int(id_str, 16)
 
-        confirmed = False
-        while not confirmed:
-            pressed = wait_for_single_key()
-            if pressed == hid_code:
-                for a in addresses:
-                    av = int(a, 16)
-                    send_colour(ldev, av,*GREEN)
-                print(f"  ✓ {key_name} verified!")
-                verified[str(hid_code)] = {"name": key_name, "addresses": addresses}
-                confirmed = True
-            else:
-                wrong = HID_KEY_MAP.get(pressed, f"0x{pressed:02x}")
-                for a in addresses:
-                    av = int(a, 16)
-                    send_colour(ldev, av, *RED)
-                print(f"  ✗ Got {wrong}. Try again...")
-                time.sleep(0.5)
-                for a in addresses:
-                    av = int(a, 16)
-                    send_colour(ldev, av, *WHITE)
+    if y_hid is None or n_hid is None:
+        print("ERROR: Y and/or N keys not found in Control.json — run Pass 1 first!")
+        return ctrl
 
-        ctrl["verified_keys"] = verified
-        save_control_js(ctrl)
+    print(f"Y key: {HID_DISPLAY_MAP.get(y_hid)} | N key: {HID_DISPLAY_MAP.get(n_hid)}\n")
+
+    # Build list of (id_str, hid_code, display_name) to verify
+    to_verify = [
+        (id_str, hid_code, HID_DISPLAY_MAP.get(hid_code, f"0x{hid_code:02x}"))
+        for id_str, hid_code in blue_keys.items()
+        if id_str not in final_map
+    ]
+
+    # Process in batches of 5
+    batch_size = 5
+    for i in range(0, len(to_verify), batch_size):
+        batch = to_verify[i:i + batch_size]
+
+        init_keyboard(ldev)
+
+        # Light Y and N keys their special colours
+        send_colour(ldev, y_id, *GREEN_YES)
+        send_colour(ldev, n_id, *RED)
+
+        # Light batch keys white
+        for id_str, hid_code, name in batch:
+            send_colour(ldev, int(id_str, 16), *WHITE)
+
+        # Show CLI prompt
+        print(f"Batch {i // batch_size + 1}: Should be lit —")
+        for id_str, hid_code, name in batch:
+            print(f"  {name} (ID {id_str})")
+        print(f"\nPress Y (green) if correct, N (red) if wrong.")
+
+        confirmed = wait_for_yn(y_hid, n_hid)
+
+        if confirmed:
+            for id_str, hid_code, name in batch:
+                send_colour(ldev, int(id_str, 16), *GREEN_CONF)
+                final_map[id_str] = {
+                    "key_id": id_str,
+                    "hid":    hid_code,
+                    "name":   name,
+                    "rgb":    [0, 0, 0]
+                }
+            print(f"  ✓ Batch confirmed!\n")
+        else:
+            print(f"  ✗ Batch flagged for review — skipping for now.\n")
+
+        ctrl["final_map"] = final_map
+        save_control(ctrl)
 
     print("\n✓ Pass 2 complete!")
-    ctrl["calibration_state"] = "pass3"
-    save_control_js(ctrl)
-    return ctrl
-
-
-# ═════════════════════════════════════════════
-# PASS 3 — Lock-in
-# ═════════════════════════════════════════════
-
-def pass3_lockin(ldev, idev, ctrl):
-    print("\n" + "="*60)
-    print("PASS 3: FINAL LOCK-IN")
-    print("="*60)
-    print("Press each key as called. Confirmed keys go DARK (locked).")
-    print("="*60 + "\n")
-
-    verified  = ctrl.get("verified_keys", {})
-    locked    = ctrl.get("locked_keys", {})
-    final_map = ctrl.get("final_map", {})
-    to_lock   = [(int(k), v) for k, v in verified.items() if k not in locked]
-
-    for hid_code, key_data in to_lock:
-        key_name  = key_data["name"]
-        addresses = key_data["addresses"]
-        print(f"\nConfirm: [ {key_name} ]")
-
-        for a in addresses:
-            av = int(a, 16)
-            send_colour(ldev, av, *WHITE)
-
-        pressed = wait_for_single_key()
-
-        if pressed == hid_code:
-            for a in addresses:
-                av = int(a, 16)
-                send_colour(ldev, av, *OFF)
-            print(f"  ✓ {key_name} LOCKED.")
-            locked[str(hid_code)] = key_data
-            final_map[key_name] = {"address": addresses[0], "hid": hid_code, "rgb": [0, 0, 0]}
-        else:
-            wrong = HID_KEY_MAP.get(pressed, f"0x{pressed:02x}")
-            print(f"  ✗ Expected {key_name}, got {wrong}. Flagged for re-check.")
-
-        ctrl.update({"locked_keys": locked, "final_map": final_map})
-        save_control_js(ctrl)
-
-    print(f"\n✓ Pass 3 complete! {len(locked)} keys locked.")
     ctrl["calibration_state"] = "complete"
-    save_control_js(ctrl)
+    save_control(ctrl)
     return ctrl
 
 
@@ -379,77 +531,47 @@ def pass3_lockin(ldev, idev, ctrl):
 # Main
 # ═════════════════════════════════════════════
 
-def init_keyboard(handle):
-    """Send the initialisation sequence required before colour commands will work."""
-    def send_raw(pkt_bytes):
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        written = ctypes.c_ulong(0)
-        pkt = (ctypes.c_ubyte * 64)(*pkt_bytes[:64])
-        kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
-        time.sleep(0.02)
-
-    
-    # Double START
-    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
-    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
-    # Mode switch to custom lighting (required before per-key colours work)
-    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
-    send_raw([0x04, 0x1b, 0x00, 0x06, 0x01, 0x00, 0x00, 0x00, 0x14] + [0x00] * 55)
-    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
-
-    # Clear all keys to black
-    offsets   = [0x00, 0x36, 0x6c, 0xa2, 0xd8, 0x0e, 0x44, 0x7a]
-    csum_vals = [0x47, 0x7d, 0xb2, 0xe8, 0x1f, 0x56, 0x8c, 0xc2]
-    for offset, csum in zip(offsets, csum_vals):
-        hi = 0x01 if csum >= 0x100 else 0x00
-        send_raw([0x04, csum & 0xFF, hi, 0x11, 0x36, offset, 0x00, 0x00] + [0x00] * 56)
-
-    # COMMIT
-    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
-    print("  [Keyboard initialised]")
-
-
 def main():
-    print("="*60)
+    print("Available K582 interfaces:")
+    for dev in hid.enumerate(0x320F, 0x5000):
+        print(f"  Interface {dev.get('interface_number')}: usage={hex(dev.get('usage',0))} usage_page={hex(dev.get('usage_page',0))}")
+
+    print("\n" + "="*60)
     print(" Redragon K582 Surara — Finder.py")
     print(" LED Address Calibration Tool")
     print(" Open Source RGB Controller Project")
     print("="*60)
 
     try:
-        print("\nOpening lighting interface (Interface 1)...")
+        print("\nOpening lighting interface...")
         ldev = open_lighting_device()
-        print("Opening input interface (Interface 0)...")
-        idev = open_device(IFACE_INPUT)
+        print("Opening input interface...")
+        idev = open_input_device()
         print("✓ K582 connected.\n")
     except RuntimeError as e:
         print(f"\nERROR: {e}")
         sys.exit(1)
 
-    ctrl  = load_control_js()
+    ctrl  = load_control()
     state = ctrl.get("calibration_state", "pass1")
     print(f"Calibration state: {state}\n")
-    init_keyboard(ldev)
 
     try:
         if state == "pass1":
-            ctrl  = pass1_discovery(ldev, idev, ctrl)
+            ctrl  = pass1_discovery(ldev, ctrl)
             state = ctrl.get("calibration_state", "pass2")
         if state == "pass2":
-            ctrl  = pass2_identity(ldev, idev, ctrl)
-            state = ctrl.get("calibration_state", "pass3")
-        if state == "pass3":
-            ctrl  = pass3_lockin(ldev, idev, ctrl)
+            ctrl  = pass2_verification(ldev, ctrl)
 
         if ctrl.get("calibration_state") == "complete":
             print("\n" + "="*60)
             print("CALIBRATION COMPLETE!")
-            print("Control.js is fully populated.")
+            print("Control.json is fully populated.")
             print("You can now run Controller.py to set key colours.")
             print("="*60)
 
     except KeyboardInterrupt:
-        print("\n\nInterrupted. Progress has been saved to Control.js.")
+        print("\n\nInterrupted. Progress has been saved to Control.json.")
     finally:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CloseHandle(ldev)
