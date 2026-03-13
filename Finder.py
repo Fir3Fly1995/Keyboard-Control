@@ -105,11 +105,11 @@ CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cont
 
 def open_lighting_device():
     for dev in hid.enumerate(VID, PID):
-        if "col04" in dev.get("path", "").lower():
+        if b"col04" in dev.get("path", b"").lower():
             path = dev["path"]
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             handle = kernel32.CreateFileA(
-                path.encode(),
+                path,
                 GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None, OPEN_EXISTING, 0, None
@@ -137,6 +137,7 @@ def send_colour(handle, addr_lo, addr_hi, r, g, b):
     written = ctypes.c_ulong(0)
     for pkt in [start, data, commit]:
         kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
+        print(f"Written: {written.value}")
         time.sleep(0.02)
 
 
