@@ -23,8 +23,8 @@ import json
 import time
 import os
 import sys
-import pywinusb.hid as pywinusb
 import ctypes
+import ctypes.wintypes
 
 #Lets find the break!
 print("Available K582 interfaces:")
@@ -38,6 +38,11 @@ VID            = 0x320F
 PID            = 0x5000
 IFACE_LIGHTING = 1
 IFACE_INPUT    = 0
+
+GENERIC_WRITE = 0x40000000
+OPEN_EXISTING = 0x3
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
 
 # ─────────────────────────────────────────────
 # Colours
@@ -99,12 +104,19 @@ CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Cont
 # ═════════════════════════════════════════════
 
 def open_lighting_device():
-    hid_filter = pywinusb.HidDeviceFilter(vendor_id=VID, product_id=PID)
-    devices = hid_filter.get_devices() or []
-    for d in devices:
-        if "col04" in d.device_path.lower():
-            d.open()
-            return d
+    for dev in hid.enumerate(VID, PID):
+        if "col04" in dev.get("path", "").lower():
+            path = dev["path"]
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.CreateFileA(
+                path.encode(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None, OPEN_EXISTING, 0, None
+            )
+            if handle == -1:
+                raise RuntimeError(f"CreateFileA failed: {ctypes.get_last_error()}")
+            return handle
     raise RuntimeError("K582 lighting interface not found.")
 
 def open_device(interface):
@@ -116,28 +128,15 @@ def open_device(interface):
     raise RuntimeError(f"K582 input interface not found.")
 
 
-def build_packet(addr_lo, addr_hi, r, g, b):
-    data = [0x04, 0x00, 0x00, addr_lo, addr_hi, 0xcf, 0x00, 0x00, r, g, b] + [0x00] * 53
-    csum = sum(data[3:]) & 0xFFFF
-    data[1] = csum & 0xFF
-    data[2] = (csum >> 8) & 0xFF
-    return data
-
-
-def send_colour(dev, addr_lo, addr_hi, r, g, b):
-    start  = [0x04, 0x01, 0x00, 0x01] + [0x00] * 60
-    commit = [0x04, 0x02, 0x00, 0x02] + [0x00] * 60
-    data   = build_packet(addr_lo, addr_hi, r, g, b)
-    print(f"Data packet: {data[:12]}")
-
-    import ctypes
-    for packet in [start, data, commit]:
-        buf = (ctypes.c_ubyte * 65)(0, *packet[:64])
-        bytes_written = ctypes.c_ulong(0)
-        ctypes.windll.kernel32.WriteFile(
-            int(dev.hid_handle), buf, 65,
-            ctypes.byref(bytes_written), None)
-        print(f"Written: {bytes_written.value}")
+def send_colour(handle, addr_lo, addr_hi, r, g, b):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    csum = (addr_lo + addr_hi + 0xcf + r + g + b) & 0xFFFF
+    start  = (ctypes.c_ubyte * 64)(0x04, 0x01, 0x00, 0x01, *([0]*60))
+    data   = (ctypes.c_ubyte * 64)(0x04, csum & 0xFF, (csum >> 8) & 0xFF, addr_lo, addr_hi, 0xcf, 0x00, 0x00, r, g, b, *([0]*53))
+    commit = (ctypes.c_ubyte * 64)(0x04, 0x02, 0x00, 0x02, *([0]*60))
+    written = ctypes.c_ulong(0)
+    for pkt in [start, data, commit]:
+        kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
         time.sleep(0.02)
 
 
@@ -382,13 +381,6 @@ def pass3_lockin(ldev, idev, ctrl):
 # ═════════════════════════════════════════════
 
 def main():
-    import pywinusb.hid as pywinusb
-    filter = pywinusb.HidDeviceFilter(vendor_id=VID, product_id=PID)
-    devices = filter.get_devices()
-    devices = devices if devices is not None else []
-    print(f"pywinusb found: {len(devices)} devices")
-    for d in devices:
-        print(f"  {d}")
     print("="*60)
     print(" Redragon K582 Surara — Finder.py")
     print(" LED Address Calibration Tool")
@@ -429,7 +421,8 @@ def main():
     except KeyboardInterrupt:
         print("\n\nInterrupted. Progress has been saved to Control.js.")
     finally:
-        ldev.close()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle(ldev)
         idev.close()
 
 
