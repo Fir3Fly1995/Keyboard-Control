@@ -25,6 +25,7 @@ import os
 import sys
 import ctypes
 import ctypes.wintypes
+import keyboard
 
 #Lets find the break!
 print("Available K582 interfaces:")
@@ -52,12 +53,6 @@ BLUE  = (0,   0,   255)
 GREEN = (0,   100, 0  )
 RED   = (255, 0,   0  )
 OFF   = (0,   0,   0  )
-
-# ─────────────────────────────────────────────
-# Address scan range
-# ─────────────────────────────────────────────
-ADDR_START = 0x0000
-ADDR_END   = 0x00FF
 
 # ─────────────────────────────────────────────
 # HID usage code -> key name
@@ -96,7 +91,7 @@ HID_KEY_MAP = {
     0xE4: "R-CTRL",   0xE5: "R-SHIFT",  0xE6: "R-ALT",    0xE7: "R-WIN",
 }
 
-CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Control.js")
+CONTROL_JS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Control.json")
 
 
 # ═════════════════════════════════════════════
@@ -124,18 +119,26 @@ def open_device(interface):
         if dev.get("interface_number") == interface and dev.get("usage") == 6:
             d = hid.device()
             d.open_path(dev["path"])
+            d.set_nonblocking(1)
             return d
     raise RuntimeError(f"K582 input interface not found.")
 
 
-def send_colour(handle, addr_lo, addr_hi, r, g, b):
+def build_packet(key_id, r, g, b):
+    data = [0x04, 0x00, 0x00, 0x11, 0x03, key_id, 0x00, 0x00, r, g, b] + [0x00] * 53
+    csum = sum(data[3:]) & 0xFFFF
+    data[1] = csum & 0xFF
+    data[2] = (csum >> 8) & 0xFF
+    return data
+
+def send_colour(handle, key_id, r, g, b):
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    csum = (addr_lo + addr_hi + 0xcf + r + g + b) & 0xFFFF
     start  = (ctypes.c_ubyte * 64)(0x04, 0x01, 0x00, 0x01, *([0]*60))
-    data   = (ctypes.c_ubyte * 64)(0x04, csum & 0xFF, (csum >> 8) & 0xFF, addr_lo, addr_hi, 0xcf, 0x00, 0x00, r, g, b, *([0]*53))
+    data   = build_packet(key_id, r, g, b)
+    print(f"Packet: {list(data[:12])}")
     commit = (ctypes.c_ubyte * 64)(0x04, 0x02, 0x00, 0x02, *([0]*60))
     written = ctypes.c_ulong(0)
-    for pkt in [start, data, commit]:
+    for pkt in [start, (ctypes.c_ubyte * 64)(*data), commit]:
         kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
         print(f"Written: {written.value}")
         time.sleep(0.02)
@@ -148,19 +151,14 @@ def send_colour(handle, addr_lo, addr_hi, r, g, b):
 def load_control_js():
     if os.path.exists(CONTROL_JS_PATH):
         with open(CONTROL_JS_PATH, "r") as f:
-            content = f.read().strip()
-        if content.startswith("export default"):
-            content = content[len("export default"):].strip().rstrip(";")
-        return json.loads(content)
+            return json.load(f)
     return {"calibration_state": "pass1", "addr_map": {}, "address_to_hid": {},
             "verified_keys": {}, "locked_keys": {}, "final_map": {}}
 
 
 def save_control_js(data):
     with open(CONTROL_JS_PATH, "w") as f:
-        f.write("export default ")
         json.dump(data, f, indent=2)
-        f.write(";\n")
     print(f"  [Saved -> {CONTROL_JS_PATH}]")
 
 
@@ -172,6 +170,7 @@ def read_pressed_keys(input_dev):
     pressed = set()
     try:
         report = input_dev.read(64)
+        print(f"Raw report: {report[:8]}") #debug, hopefully
         if report and len(report) >= 8:
             mod = report[0]
             if mod & 0x01: pressed.add(0xE0)
@@ -185,42 +184,41 @@ def read_pressed_keys(input_dev):
             for b in report[2:8]:
                 if b != 0x00:
                     pressed.add(b)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Read error: {e}")
+    pass
     return pressed
 
 
 def wait_for_confirm(input_dev):
-    """Wait for L-Alt + Enter. Returns all non-modifier/non-Enter keys pressed before confirm."""
     print("  >> Press lit keys, then L-ALT + ENTER to confirm...")
     collected = set()
-    last = set()
     while True:
         time.sleep(0.02)
-        pressed = read_pressed_keys(input_dev)
-        for k in pressed - last:
-            if k not in (0xE2, 0x28):
-                if k not in collected:
-                    collected.add(k)
-                    print(f"    Key detected: {HID_KEY_MAP.get(k, f'0x{k:02x}')} (HID 0x{k:02x})")
-        if 0xE2 in pressed and 0x28 in pressed:
+        for hid_code, key_name in HID_KEY_MAP.items():
+            try:
+                if keyboard.is_pressed(key_name.lower()):
+                    if hid_code not in (0xE2, 0x28) and hid_code not in collected:
+                        collected.add(hid_code)
+                        print(f"    Key detected: {HID_KEY_MAP.get(hid_code, f'0x{hid_code:02x}')} (HID 0x{hid_code:02x})")
+            except ValueError:
+                continue
+        if keyboard.is_pressed('left alt') and keyboard.is_pressed('num enter'):
             time.sleep(0.15)
             break
-        last = pressed
     return collected
 
-
-def wait_for_single_key(input_dev):
-    """Wait for exactly one non-modifier keypress and return its HID code."""
-    last = set()
-    MODIFIERS = {0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7}
+def wait_for_single_key():
+    MODIFIERS = {'left ctrl','left shift','left alt','left windows',
+                 'right ctrl','right shift','right alt','right windows'}
     while True:
         time.sleep(0.02)
-        pressed = read_pressed_keys(input_dev)
-        new = (pressed - last) - MODIFIERS
-        if new:
-            return next(iter(new))
-        last = pressed
+        for hid_code, key_name in HID_KEY_MAP.items():
+            try:
+                if key_name.lower() not in MODIFIERS and keyboard.is_pressed(key_name.lower()):
+                    return hid_code
+            except ValueError:
+                continue
 
 
 # ═════════════════════════════════════════════
@@ -231,42 +229,42 @@ def pass1_discovery(ldev, idev, ctrl):
     print("\n" + "="*60)
     print("PASS 1: DISCOVERY")
     print("="*60)
-    print("One address at a time will light WHITE.")
-    print("Press every key that lights up, then L-ALT + ENTER.")
-    print("Multiple keys lighting = address overlap (thats fine!).")
+    print("One key ID at a time will light WHITE.")
+    print("Press every key that lights up, then L-ALT + NUM ENTER.")
+    print("Multiple keys lighting = shared ID (thats fine!).")
     print("="*60 + "\n")
 
     addr_map       = ctrl.get("addr_map", {})
     address_to_hid = ctrl.get("address_to_hid", {})
-    start          = ctrl.get("last_addr", ADDR_START - 1) + 1
+    start          = ctrl.get("last_addr", -1) + 1
 
-    if start > ADDR_START:
-        print(f"Resuming from address 0x{start:04x}\n")
+    if start > 0:
+        print(f"Resuming from key ID 0x{start:02x}\n")
 
-    for addr in range(start, ADDR_END + 1):
-        alo, ahi = addr & 0xFF, (addr >> 8) & 0xFF
-        addr_str = f"0x{addr:04x}"
-        print(f"Address {addr_str}  ({addr - ADDR_START + 1}/{ADDR_END - ADDR_START + 1})")
+    for key_id in range(start, 0x100):
+        id_str = f"0x{key_id:02x}"
+        print(f"Key ID {id_str}  ({key_id + 1}/256)")
 
-        send_colour(ldev, alo, ahi, *WHITE)
+        init_keyboard(ldev)
+        send_colour(ldev, key_id, *WHITE)
         pressed_hids = wait_for_confirm(idev)
-        send_colour(ldev, alo, ahi, *BLUE)
+        send_colour(ldev, key_id, *BLUE)
 
         if pressed_hids:
-            address_to_hid[addr_str] = list(pressed_hids)
+            address_to_hid[id_str] = list(pressed_hids)
             for hid_code in pressed_hids:
                 key = str(hid_code)
                 if key not in addr_map:
                     addr_map[key] = []
-                if addr_str not in addr_map[key]:
-                    addr_map[key].append(addr_str)
+                if id_str not in addr_map[key]:
+                    addr_map[key].append(id_str)
             names = [HID_KEY_MAP.get(h, f"0x{h:02x}") for h in pressed_hids]
-            print(f"  -> Mapped: {', '.join(names)} = {addr_str}\n")
+            print(f"  -> Mapped: {', '.join(names)} = {id_str}\n")
         else:
-            print(f"  -> No keys pressed. Skipping.\n")
+            print(f"  -> No keys lit. Skipping.\n")
 
         ctrl.update({"addr_map": addr_map, "address_to_hid": address_to_hid,
-                     "last_addr": addr, "calibration_state": "pass1"})
+                     "last_addr": key_id, "calibration_state": "pass1"})
         save_control_js(ctrl)
 
     print("\n✓ Pass 1 complete!")
@@ -297,16 +295,16 @@ def pass2_identity(ldev, idev, ctrl):
         print(f"\nPress: [ {key_name} ]")
 
         for a in addresses:
-            av = int(a, 16)
-            send_colour(ldev, av & 0xFF, av >> 8, *WHITE)
+                av = int(a, 16)
+                send_colour(ldev, av, *WHITE)
 
         confirmed = False
         while not confirmed:
-            pressed = wait_for_single_key(idev)
+            pressed = wait_for_single_key()
             if pressed == hid_code:
                 for a in addresses:
                     av = int(a, 16)
-                    send_colour(ldev, av & 0xFF, av >> 8, *GREEN)
+                    send_colour(ldev, av,*GREEN)
                 print(f"  ✓ {key_name} verified!")
                 verified[str(hid_code)] = {"name": key_name, "addresses": addresses}
                 confirmed = True
@@ -314,12 +312,12 @@ def pass2_identity(ldev, idev, ctrl):
                 wrong = HID_KEY_MAP.get(pressed, f"0x{pressed:02x}")
                 for a in addresses:
                     av = int(a, 16)
-                    send_colour(ldev, av & 0xFF, av >> 8, *RED)
+                    send_colour(ldev, av, *RED)
                 print(f"  ✗ Got {wrong}. Try again...")
                 time.sleep(0.5)
                 for a in addresses:
                     av = int(a, 16)
-                    send_colour(ldev, av & 0xFF, av >> 8, *WHITE)
+                    send_colour(ldev, av, *WHITE)
 
         ctrl["verified_keys"] = verified
         save_control_js(ctrl)
@@ -353,14 +351,14 @@ def pass3_lockin(ldev, idev, ctrl):
 
         for a in addresses:
             av = int(a, 16)
-            send_colour(ldev, av & 0xFF, av >> 8, *WHITE)
+            send_colour(ldev, av, *WHITE)
 
-        pressed = wait_for_single_key(idev)
+        pressed = wait_for_single_key()
 
         if pressed == hid_code:
             for a in addresses:
                 av = int(a, 16)
-                send_colour(ldev, av & 0xFF, av >> 8, *OFF)
+                send_colour(ldev, av, *OFF)
             print(f"  ✓ {key_name} LOCKED.")
             locked[str(hid_code)] = key_data
             final_map[key_name] = {"address": addresses[0], "hid": hid_code, "rgb": [0, 0, 0]}
@@ -380,6 +378,36 @@ def pass3_lockin(ldev, idev, ctrl):
 # ═════════════════════════════════════════════
 # Main
 # ═════════════════════════════════════════════
+
+def init_keyboard(handle):
+    """Send the initialisation sequence required before colour commands will work."""
+    def send_raw(pkt_bytes):
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        written = ctypes.c_ulong(0)
+        pkt = (ctypes.c_ubyte * 64)(*pkt_bytes[:64])
+        kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
+        time.sleep(0.02)
+
+    
+    # Double START
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    # Mode switch to custom lighting (required before per-key colours work)
+    send_raw([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    send_raw([0x04, 0x1b, 0x00, 0x06, 0x01, 0x00, 0x00, 0x00, 0x14] + [0x00] * 55)
+    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
+
+    # Clear all keys to black
+    offsets   = [0x00, 0x36, 0x6c, 0xa2, 0xd8, 0x0e, 0x44, 0x7a]
+    csum_vals = [0x47, 0x7d, 0xb2, 0xe8, 0x1f, 0x56, 0x8c, 0xc2]
+    for offset, csum in zip(offsets, csum_vals):
+        hi = 0x01 if csum >= 0x100 else 0x00
+        send_raw([0x04, csum & 0xFF, hi, 0x11, 0x36, offset, 0x00, 0x00] + [0x00] * 56)
+
+    # COMMIT
+    send_raw([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
+    print("  [Keyboard initialised]")
+
 
 def main():
     print("="*60)
@@ -401,6 +429,7 @@ def main():
     ctrl  = load_control_js()
     state = ctrl.get("calibration_state", "pass1")
     print(f"Calibration state: {state}\n")
+    init_keyboard(ldev)
 
     try:
         if state == "pass1":
