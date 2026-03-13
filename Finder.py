@@ -117,7 +117,7 @@ def open_device(interface):
 
 
 def build_packet(addr_lo, addr_hi, r, g, b):
-    data = [0x04, 0x00, 0x00, addr_lo, addr_hi, 0x00, 0x00, 0x00, r, g, b] + [0x00] * 53
+    data = [0x04, 0x00, 0x00, addr_lo, addr_hi, 0xcf, 0x00, 0x00, r, g, b] + [0x00] * 53
     csum = sum(data[3:]) & 0xFFFF
     data[1] = csum & 0xFF
     data[2] = (csum >> 8) & 0xFF
