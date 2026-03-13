@@ -1,0 +1,24 @@
+{
+  "dependencies": {
+    "node-hid": "^3.3.0"
+  },
+  "name": "keyboard-control",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fir3Fly1995/Keyboard-Control.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Fir3Fly1995/Keyboard-Control/issues"
+  },
+  "homepage": "https://github.com/Fir3Fly1995/Keyboard-Control#readme"
+}

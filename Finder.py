@@ -135,7 +135,7 @@ def send_colour(dev, addr_lo, addr_hi, r, g, b):
         buf = (ctypes.c_ubyte * 65)(0, *packet[:64])
         bytes_written = ctypes.c_ulong(0)
         ctypes.windll.kernel32.WriteFile(
-            dev._device_handle, buf, 65,
+            int(dev.hid_handle), buf, 65,
             ctypes.byref(bytes_written), None)
         print(f"Written: {bytes_written.value}")
         time.sleep(0.02)
