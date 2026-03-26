@@ -1,3 +1,4 @@
 kbenv/
 node_modules/
 dist/
+.claude/

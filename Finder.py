@@ -147,11 +147,26 @@ def send_colour(handle, key_id, r, g, b):
     written  = ctypes.c_ulong(0)
     start    = (ctypes.c_ubyte * 64)(0x04, 0x01, 0x00, 0x01, *([0]*60))
     data     = (ctypes.c_ubyte * 64)(*build_packet(key_id, r, g, b))
-    print(f"  DBG: {list(build_packet(key_id, r, g, b)[:12])}")  # ADD HERE
     commit   = (ctypes.c_ubyte * 64)(0x04, 0x02, 0x00, 0x02, *([0]*60))
     for pkt in [start, data, commit]:
         kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
         time.sleep(0.02)
+
+
+def send_batch(handle, colour_list):
+    """Send multiple key colours atomically: one START, N DATA packets, one COMMIT."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    written  = ctypes.c_ulong(0)
+
+    def write_pkt(pkt_bytes):
+        pkt = (ctypes.c_ubyte * 64)(*pkt_bytes[:64])
+        kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
+        time.sleep(0.02)
+
+    write_pkt([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
+    for key_id, r, g, b in colour_list:
+        write_pkt(build_packet(key_id, r, g, b))
+    write_pkt([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
 
 
 def init_keyboard(handle):
@@ -193,12 +208,12 @@ def init_keyboard(handle):
 
 def paint_keyboard(handle, ctrl):
     """Repaint all known keys from Control.json (blue=mapped, red=conflict)."""
-    blue_keys = ctrl.get("blue_keys", {})
-    red_keys  = ctrl.get("red_keys", {})
-    for id_str in blue_keys:
-        send_colour(handle, int(id_str, 16), *BLUE)
-    for id_str in red_keys:
-        send_colour(handle, int(id_str, 16), *RED)
+    colours = (
+        [(int(k, 16), *BLUE) for k in ctrl.get("blue_keys", {})] +
+        [(int(k, 16), *RED)  for k in ctrl.get("red_keys",  {})]
+    )
+    if colours:
+        send_batch(handle, colours)
 
 
 # ═════════════════════════════════════════════
@@ -345,17 +360,19 @@ def pass1_discovery(ldev, ctrl):
 
         print(f"Key ID {id_str}  ({key_id + 1}/256)")
 
-        # Light the current key white
-        send_colour(ldev, key_id, *WHITE)
+        # Paint known state + current key white in one atomic transaction
+        colours = (
+            [(int(k, 16), *BLUE) for k in blue_keys] +
+            [(int(k, 16), *RED)  for k in red_keys]  +
+            [(key_id, *WHITE)]
+        )
+        send_batch(ldev, colours)
 
         # Wait for user confirmation
         if confirm_key is None:
             pressed_hids = wait_for_lalt_numenter()
         else:
             pressed_hids = wait_for_confirm_key(confirm_key)
-
-        # Turn off the white key before repainting
-        send_colour(ldev, key_id, *OFF)
 
         if not pressed_hids:
             print(f"  -> No keys pressed. Skipping.\n")
@@ -489,13 +506,11 @@ def pass2_verification(ldev, ctrl):
 
         init_keyboard(ldev)
 
-        # Light Y and N keys their special colours
-        send_colour(ldev, y_id, *GREEN_YES)
-        send_colour(ldev, n_id, *RED)
-
-        # Light batch keys white
-        for id_str, hid_code, name in batch:
-            send_colour(ldev, int(id_str, 16), *WHITE)
+        colours = (
+            [(y_id, *GREEN_YES), (n_id, *RED)] +
+            [(int(id_str, 16), *WHITE) for id_str, _, _ in batch]
+        )
+        send_batch(ldev, colours)
 
         # Show CLI prompt
         print(f"Batch {i // batch_size + 1}: Should be lit —")
@@ -506,8 +521,8 @@ def pass2_verification(ldev, ctrl):
         confirmed = wait_for_yn(y_hid, n_hid)
 
         if confirmed:
+            send_batch(ldev, [(int(id_str, 16), *GREEN_CONF) for id_str, _, _ in batch])
             for id_str, hid_code, name in batch:
-                send_colour(ldev, int(id_str, 16), *GREEN_CONF)
                 final_map[id_str] = {
                     "key_id": id_str,
                     "hid":    hid_code,
