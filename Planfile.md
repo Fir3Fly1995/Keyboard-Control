@@ -134,4 +134,94 @@ The CH555 controller does not have a public protocol spec. Before any code can b
 
 ---
 
+# NOTES: What The Hells Is Happening
+---
+1. started with reverse engineering the Redragon .exe file, then used wireshark to capture packets of colour change data to determine what is being sent back and forth. The wireshark files are included int he repo.
+2. built the finder.py to enable keys address discovery so this program can be used for any redreagon keyboard. 
+3. while testing the Finder.py during development, we are unable to send the correct colours to the keyboard itself. 
+
+## The idea: If any
+We could try to use the testfile.py to manually sequence 4 random addresses, using a pre-scripted method, this could enable the discovery of the cause of the issue ast hand. 
+
+## The Issue. 
+The currently faced issue with finder .py is the colours are not being sent properly, the keyboard is not correctly updating. the result is, it is impossible to press an appropriate key after the first key is confirmed. 
+
+---
+
+# AI NOTES — IPEOR Progress Log
+
+---
+
+## EXECUTE — What Was Done
+
+1. **Wireshark capture** — MITRA software was run and USB HID packets were captured. The raw packet structure was extracted from the capture files included in the repo.
+
+2. **Protocol fully reverse-engineered** — From Wireshark data:
+   - VID: `0x320F`, PID: `0x5000`
+   - Lighting interface: `col04` path (interface 1)
+   - Input interface: interface 0, usage=6
+   - Packets are **64 bytes**, no report ID byte
+   - Transaction model: **START → one or more DATA → COMMIT**
+   - `START:  [0x04, 0x01, 0x00, 0x01, 0x00 * 60]`
+   - `DATA:   [0x04, csum_lo, csum_hi, 0x11, 0x03, key_id, 0x00, 0x00, R, G, B, 0x00 * 53]`
+   - `COMMIT: [0x04, 0x02, 0x00, 0x02, 0x00 * 60]`
+   - Checksum: `sum(data[3:]) & 0xFFFF`, lo byte → `[1]`, hi byte → `[2]`
+   - Writing uses `kernel32.CreateFileA` + `kernel32.WriteFile` — **NOT** the `hid` library
+   - Input reading uses `hid.device()` via the `hid` Python library (hidapi)
+
+3. **testfile.py** — Proof-of-concept written. Manually hardcoded a single DATA packet for the H key (`key_id=0xCF`) at white (255,255,255). **Confirmed: the protocol works.** Key lit correctly.
+   - Known confirmed key_ids: `ESC=0x00`, `F1=0x01`, `W=0x84`, `A=0xC0`, `H=0xCF`
+
+4. **Finder.py built** — Full two-pass LED address calibration tool:
+   - **Pass 1 (Discovery)**: Iterates all 256 key_ids (`0x00–0xFF`). Lights each WHITE. User presses the physical key that lit, confirms with L-ALT + NUM ENTER (first time), then with the first confirmed key thereafter. Mapped = BLUE, conflict = RED.
+   - **Red resolution sub-phase**: For any conflicted address, shows it WHITE against the rest and asks user to press the correct key.
+   - **Pass 2 (Verification)**: Batches of 5 keys lit WHITE. User presses Y (green=correct) or N (red=wrong). Confirmed keys written to `final_map` in Control.json.
+   - State is saved to `Control.json` after every keypress — safe to interrupt and resume.
+
+5. **Control.json format established** — differs from the original plan's hypothetical `Control.js`:
+```json
+{
+  "calibration_state": "pass1 | pass2 | complete",
+  "confirm_key": <hid_code int>,
+  "blue_keys":   { "0xNN": <hid_code int> },
+  "red_keys":    { "0xNN": [<hid_codes>] },
+  "final_map":   { "0xNN": { "key_id": "0xNN", "hid": int, "name": "KEY", "rgb": [0,0,0] } },
+  "last_addr":   <int>
+}
+```
+
+6. **Batching introduced** — Each START/DATA/COMMIT transaction replaces the entire keyboard LED state. Per-key individual transactions caused the "snake effect" (each new START wipes previous keys). Fix: one START, N DATA packets, one COMMIT = atomic multi-key update. `send_batch(handle, colour_list)` added to `Finder.py`.
+
+---
+
+## OBSERVE — What Was Found During Testing
+
+- **Snake effect (symptom)**: After confirming ESC (white → confirmed), keyboard should show ESC=BLUE and F1=WHITE. Instead: ESC appeared as `(128, 128, 255)` (half-blended) and F1 appeared as `(255, 0, 0)`. Error worsens with each subsequent key.
+
+- **Root cause hypothesis A**: 20ms inter-packet sleep inside `send_batch` was causing the keyboard firmware to timeout or split the transaction, blending partial state from two updates.
+
+- **Fix applied**: Removed all inter-packet delays from `send_batch`. Single `50ms` sleep after COMMIT. Added `200ms` settling delay after `init_keyboard`. **Status: applied, awaiting test.**
+
+- **Diagnostic suggestion (pending)**: Manually script 4 addresses testfile.py-style (no loop, no state machine) to confirm whether multi-DATA batches work at all on this firmware, or whether only 1 DATA packet per transaction is supported.
+
+---
+
+## RESULTS — Current State
+
+| Component     | Status                                               |
+|---------------|------------------------------------------------------|
+| Protocol      | COMPLETE — fully reverse-engineered via Wireshark    |
+| testfile.py   | COMPLETE — proof of concept, protocol confirmed      |
+| Finder.py     | BUILT — active bug (wrong colours / snake effect)    |
+| Control.json  | FORMAT ESTABLISHED — has partial pass1 data          |
+| Keyboard.py   | STUB — not yet built                                 |
+| Controller.py | STUB — not yet built                                 |
+
+**Next actions:**
+1. Resolve Finder.py snake effect (test timing fix; fallback: testfile.py-style manual batch diagnostic)
+2. Build `Keyboard.py` (hardware layer — wraps `send_batch` for use by `Controller.py`)
+3. Build `Controller.py` (GUI — reads `final_map` from `Control.json`, dispatches colour commands)
+
+---
+
 *This planfile is a living document and will be updated as the discovery phase progresses.*
