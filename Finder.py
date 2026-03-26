@@ -378,7 +378,6 @@ def pass1_discovery(ldev, ctrl):
             print(f"  -> No keys pressed. Skipping.\n")
             ctrl["last_addr"] = key_id
             save_control(ctrl)
-            paint_keyboard(ldev, ctrl)
             continue
 
         # Remove confirm key from pressed set if accidentally included
@@ -415,10 +414,6 @@ def pass1_discovery(ldev, ctrl):
         })
         save_control(ctrl)
 
-        # Blank and repaint known keys before next address
-        init_keyboard(ldev)
-        paint_keyboard(ldev, ctrl)
-
     # ── Red resolution sub-phase ──────────────────────────────
     if red_keys:
         print("\n" + "="*60)
@@ -429,9 +424,12 @@ def pass1_discovery(ldev, ctrl):
 
         for id_str in list(red_keys.keys()):
             key_id = int(id_str, 16)
-            init_keyboard(ldev)
-            paint_keyboard(ldev, ctrl)
-            send_colour(ldev, key_id, *WHITE)
+            colours = (
+                [(int(k, 16), *BLUE) for k in blue_keys] +
+                [(int(k, 16), *RED)  for k in red_keys if k != id_str] +
+                [(key_id, *WHITE)]
+            )
+            send_batch(ldev, colours)
             print(f"Key ID {id_str} — which key lit white?")
 
             pressed = wait_for_confirm_key(confirm_key)
