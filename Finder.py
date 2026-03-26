@@ -161,12 +161,12 @@ def send_batch(handle, colour_list):
     def write_pkt(pkt_bytes):
         pkt = (ctypes.c_ubyte * 64)(*pkt_bytes[:64])
         kernel32.WriteFile(handle, pkt, 64, ctypes.byref(written), None)
-        time.sleep(0.02)
 
     write_pkt([0x04, 0x01, 0x00, 0x01] + [0x00] * 60)
     for key_id, r, g, b in colour_list:
         write_pkt(build_packet(key_id, r, g, b))
     write_pkt([0x04, 0x02, 0x00, 0x02] + [0x00] * 60)
+    time.sleep(0.05)
 
 
 def init_keyboard(handle):
@@ -349,6 +349,7 @@ def pass1_discovery(ldev, ctrl):
 
     # Initial keyboard setup — only once
     init_keyboard(ldev)
+    time.sleep(0.2)
     paint_keyboard(ldev, ctrl)
 
     for key_id in range(start, 0x100):
